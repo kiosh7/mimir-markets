@@ -66,6 +66,8 @@ export interface ClaimRow {
   first_indexed_at: number;
   updated_at: number;
   is_final: number;
+  /** On-chain evidence hash, hex-encoded. Null for unsettled or pre-migration claims. */
+  evidence_hash: string | null;
 }
 
 export interface ChallengerRow {
@@ -653,6 +655,25 @@ const SCHEMA_STATEMENTS: SqlStatement[] = [
     sql: "INSERT INTO sync_meta(key, value) VALUES($1, $2) ON CONFLICT(key) DO NOTHING",
     args: ["last_sync_at", "0"],
   },
+  // Evidence hash binding (schema migration v3).
+  //
+  // Adds `evidence_hash` to the claims read-index as a projected mirror of the
+  // on-chain BytesN<32> field stored by `resolve_claim`. Storing it here lets the
+  // UI and API serve the hash from the read-index without a Soroban RPC round-trip
+  // on every request.
+  //
+  // The column is nullable because:
+  //  - Claims that were settled before this migration ran have no cached hash row.
+  //  - Open / active / cancelled claims never carry an evidence_hash.
+  //  - The hash is already the authoritative record on chain; the DB is a cache.
+  //
+  // `IF NOT EXISTS` makes this safe to re-run on a schema that already has it.
+  { sql: "ALTER TABLE claims ADD COLUMN IF NOT EXISTS evidence_hash TEXT" },
+  { sql: "CREATE INDEX IF NOT EXISTS idx_claims_evidence_hash ON claims(evidence_hash) WHERE evidence_hash IS NOT NULL" },
+  {
+    sql: "INSERT INTO schema_migrations(migration_id, schema_version, checksum, applied_at) VALUES($1, $2, $3, $4) ON CONFLICT(schema_version) DO NOTHING",
+    args: ["evidence-hash-binding-v3", 3, "claims-evidence-hash-column-v3", 0],
+  },
 ];
 
 declare global {
@@ -766,6 +787,7 @@ function normalizeClaimRow(row: Record<string, unknown>): ClaimRow {
     first_indexed_at: getNumber(row.first_indexed_at),
     updated_at: getNumber(row.updated_at),
     is_final: getNumber(row.is_final),
+    evidence_hash: getNullableString(row.evidence_hash),
   };
 }
 
@@ -854,6 +876,10 @@ function buildIndexedClaimRecord(claim: ClaimData): IndexedClaimRecord {
     challenger_count: claim.challenger_count,
     total_pot: claim.total_pot,
     first_challenger: claim.first_challenger ?? claim.challenger_addresses?.[0] ?? "",
+    // evidence_hash is optional on ClaimData (absent for unsettled claims).
+    // A null value is correct and expected — the upsert will preserve any
+    // existing value via the COALESCE in the ON CONFLICT clause.
+    evidence_hash: claim.evidence_hash ?? null,
   };
 }
 
@@ -866,8 +892,8 @@ function buildClaimUpsertStatement(claim: ClaimData, timestamp: number): SqlStat
       deadline, state, winner_side, resolution_summary, confidence, category,
       parent_id, market_type, odds_mode, challenger_payout_bps, handicap_line,
       settlement_rule, max_challengers, visibility, challenger_count, total_pot,
-      first_challenger, first_indexed_at, updated_at, is_final
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      first_challenger, first_indexed_at, updated_at, is_final, evidence_hash
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       creator = excluded.creator,
       question = excluded.question,
@@ -899,7 +925,11 @@ function buildClaimUpsertStatement(claim: ClaimData, timestamp: number): SqlStat
         ELSE excluded.first_indexed_at
       END,
       updated_at = excluded.updated_at,
-      is_final = excluded.is_final`,
+      is_final = excluded.is_final,
+      -- Preserve an existing non-null hash: a later re-index of an open/active
+      -- claim (which has no evidence_hash) must not clobber the settled hash
+      -- written by the resolution sync pass.
+      evidence_hash = COALESCE(excluded.evidence_hash, claims.evidence_hash)`,
     args: [
       record.id,
       record.creator,
@@ -930,6 +960,7 @@ function buildClaimUpsertStatement(claim: ClaimData, timestamp: number): SqlStat
       timestamp,
       timestamp,
       record.state === "resolved" || record.state === "cancelled" ? 1 : 0,
+      record.evidence_hash,
     ],
   };
 }

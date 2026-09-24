@@ -169,6 +169,16 @@ export const FEATURES = [
   // in-process-only nonce store, which loses replay protection on restart and across
   // instances. Only disable in an isolated local dev environment.
   "nonce_persistence",
+  // Bind evidence hashes to raw source bytes. ON by default — when enabled the
+  // oracle stores SHA-256(rawBytes) as the on-chain evidence_hash so any party
+  // can re-fetch the URL, hash the response body, and reproduce the digest. When
+  // disabled (MIMIR_FEATURE_EVIDENCE_HASH_BINDING=0) the oracle falls back to
+  // SHA-256(text) which was the pre-migration behaviour — only disable if a
+  // rollback is needed and old hashes must match. Non-determinism warning: two
+  // fetches of the same URL at different times may return different bytes if the
+  // page changes; the hash is a commitment to what the oracle actually saw, not
+  // a claim that the URL is immutable.
+  "evidence_hash_binding",
 ] as const;
 export type Feature = (typeof FEATURES)[number];
 
@@ -203,6 +213,11 @@ const FEATURE_DEFAULTS: Record<Feature, boolean> = {
   // Nonce persistence is a security invariant, not a product rollout. Default ON
   // so no deploy step is needed; only disable in isolated local dev.
   nonce_persistence: true,
+  // Evidence hash binding is a security invariant — on by default so every new
+  // settlement commits to raw bytes rather than processed text. Only disable via
+  // MIMIR_FEATURE_EVIDENCE_HASH_BINDING=0 in isolated local dev or during a
+  // deliberate rollback window.
+  evidence_hash_binding: true,
 };
 
 function featureEnvKey(feature: Feature): string {

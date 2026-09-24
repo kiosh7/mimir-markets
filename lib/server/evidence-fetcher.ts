@@ -68,6 +68,26 @@ export interface EvidenceSnapshot {
   fetcher: EvidenceFetcherKind;
   /** Set when the source was paywalled and the agent paid in USDC. */
   payment?: EvidencePayment;
+  /**
+   * Raw HTTP response bytes before any HTML stripping or truncation.
+   *
+   * Present for `direct`, `jina`, and `bot-paid` fetchers — i.e. any path that
+   * made a real HTTP request and read the response body. Absent for the
+   * `coingecko-api` fetcher, whose output is a synthetic text block assembled
+   * from a parsed JSON payload and cannot be reproduced as "raw bytes" a verifier
+   * could re-fetch.
+   *
+   * When present, callers should prefer SHA-256(rawBytes) as the on-chain
+   * evidence_hash because it is independent of Mimir's text-processing pipeline
+   * (strip, truncate). A verifier who re-fetches the URL and hashes the response
+   * body will obtain the same digest.
+   *
+   * The field is intentionally OPTIONAL (not always populated) because:
+   *  - CoinGecko path: no single "raw" body exists; the text is synthesised.
+   *  - Future fetchers: may not have access to a raw body.
+   * Callers should check `rawBytes !== undefined` before trusting the binding.
+   */
+  rawBytes?: Buffer;
 }
 
 export class EvidenceFetchError extends Error {
@@ -159,6 +179,9 @@ async function fetchGenericSnapshot(
         text,
         fetchedAt: Date.now(),
         fetcher: "direct",
+        // Bind to the original bytes before strip+truncation so verifiers can
+        // reproduce the hash without knowing Mimir's processing pipeline.
+        rawBytes: direct.rawBodyBytes,
       };
     }
     // Body parsed but is too short to be useful — fall through to Jina.
@@ -180,6 +203,8 @@ async function fetchGenericSnapshot(
 interface DirectFetchResult {
   ok: boolean;
   body: string;
+  /** Raw response bytes before any text processing. Present when ok is true. */
+  rawBodyBytes?: Buffer;
   finalUrl: string;
   statusCode?: number;
 }
@@ -270,8 +295,12 @@ async function tryDirectFetch(
       return { ok: false, body: "", finalUrl: response.url || finalUrl, statusCode: response.status };
     }
 
-    const body = await response.text();
-    return { ok: true, body, finalUrl: response.url || finalUrl, statusCode: response.status };
+    // Capture the raw bytes before any text processing so we can bind the
+    // evidence hash to what was actually received over the wire.
+    const rawBuffer = await response.arrayBuffer();
+    const rawBodyBytes = Buffer.from(rawBuffer);
+    const body = rawBodyBytes.toString("utf8");
+    return { ok: true, body, rawBodyBytes, finalUrl: response.url || finalUrl, statusCode: response.status };
   } catch {
     return { ok: false, body: "", finalUrl };
   }
@@ -294,7 +323,9 @@ async function fetchViaHttp402(
   }
   if (!paid.response.ok) return null;
 
-  const raw = await paid.response.text();
+  const rawBuffer = await paid.response.arrayBuffer();
+  const rawBodyBytes = Buffer.from(rawBuffer);
+  const raw = rawBodyBytes.toString("utf8");
   const contentType = paid.response.headers.get("content-type") || "";
   const text = (/(html|xml)/i.test(contentType) ? stripHtml(raw) : raw)
     .trim()
@@ -307,6 +338,7 @@ async function fetchViaHttp402(
     text,
     fetchedAt: Date.now(),
     fetcher: "bot-paid",
+    rawBytes: rawBodyBytes,
     ...(paid.payment ? { payment: paid.payment } : {}),
   };
 }
@@ -340,7 +372,11 @@ async function fetchViaJina(
     );
   }
 
-  const raw = await response.text();
+  // Capture raw bytes before any transformation so the hash binds to what Jina
+  // returned over the wire.
+  const rawBuffer = await response.arrayBuffer();
+  const rawBodyBytes = Buffer.from(rawBuffer);
+  const raw = rawBodyBytes.toString("utf8");
   // Jina returns markdown; first non-empty heading line is a decent title.
   const title = extractJinaTitle(raw);
   const text = raw.replace(/\s+\n/g, "\n").trim().slice(0, args.maxChars);
@@ -355,6 +391,7 @@ async function fetchViaJina(
     text,
     fetchedAt: Date.now(),
     fetcher: "jina",
+    rawBytes: rawBodyBytes,
   };
 }
 

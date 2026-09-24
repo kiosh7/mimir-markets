@@ -46,3 +46,46 @@ export function isHash32Hex(value: string | null | undefined): boolean {
   const normalized = value.startsWith("0x") ? value.slice(2) : value;
   return /^[0-9a-fA-F]{64}$/.test(normalized);
 }
+
+/**
+ * Minimal snapshot shape required by `evidenceHashFromSnapshot`.
+ * Defined here rather than importing from evidence-fetcher to avoid a circular
+ * dependency: content-hash is a leaf module.
+ */
+export interface EvidenceHashable {
+  /** Raw HTTP response bytes, when available (direct / Jina / bot-paid paths). */
+  rawBytes?: Buffer | undefined;
+  /** Post-processed text (stripped HTML, truncated). Always present. */
+  text: string;
+}
+
+/**
+ * Canonical hash of an evidence snapshot, choosing the most verifiable input.
+ *
+ * When `featureEnabled` is true AND `rawBytes` are present the hash is
+ * SHA-256(rawBytes) — i.e. the same bytes any third party would get by re-fetching
+ * the URL and hashing the response body. This is the preferred binding because it
+ * is fully independent of Mimir's text-processing pipeline.
+ *
+ * When the flag is off, or when raw bytes are unavailable (CoinGecko synthesised
+ * text, or any path where `rawBytes` was not captured), the hash falls back to
+ * SHA-256(text) — the legacy behaviour. Callers that need to know which path was
+ * taken should inspect `snapshot.rawBytes !== undefined`.
+ *
+ * Council settlement mode appends an oracle-synthetic JSON tally to the commit
+ * string. That tally has no corresponding raw bytes (it is assembled by the oracle,
+ * not fetched from a URL), so the caller must pass the combined `text+council` blob
+ * as `fallbackText` and leave `rawBytes` undefined — the resulting hash covers both
+ * the evidence and the tally and is clearly documented as such.
+ */
+export function evidenceHashFromSnapshot(
+  snapshot: EvidenceHashable,
+  featureEnabled: boolean,
+  /** Override the text fallback when the caller has concatenated additional data. */
+  fallbackText?: string,
+): string {
+  if (featureEnabled && snapshot.rawBytes !== undefined && snapshot.rawBytes.byteLength > 0) {
+    return sha256Hex(snapshot.rawBytes);
+  }
+  return sha256Hex(fallbackText ?? snapshot.text);
+}

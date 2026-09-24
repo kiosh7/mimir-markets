@@ -71,7 +71,7 @@ import {
   type ClaimData,
 } from "../../lib/contract";
 import { getOracleWallet, readAgentBalances } from "../../lib/agent-wallets";
-import { sha256Hex } from "../../lib/content-hash";
+import { sha256Hex, evidenceHashFromSnapshot } from "../../lib/content-hash";
 import {
   STELLAR_NETWORK,
   getExplorerTxUrl,
@@ -85,7 +85,9 @@ import {
   EvidenceFetchError,
   type EvidenceFetcherKind,
   type EvidencePayment,
+  type EvidenceSnapshot,
 } from "../../lib/server/evidence-fetcher";
+import { isFeatureEnabled } from "../../lib/ops/flags";
 import {
   gatherCouncilVerdict,
   scoreCouncilVotes,
@@ -181,6 +183,12 @@ interface EvidenceResult {
   text: string;
   fetcher: EvidenceFetcherKind | "none";
   payment?: EvidencePayment;
+  /**
+   * Full snapshot — present when a real HTTP fetch succeeded. Used by the oracle
+   * to bind the on-chain evidence_hash to the raw response bytes rather than the
+   * post-processed text string.
+   */
+  snapshot?: EvidenceSnapshot;
 }
 
 /**
@@ -229,7 +237,7 @@ async function fetchEvidence(claim: ClaimOnChain): Promise<EvidenceResult> {
       userAgent: "Mimir-Oracle/1.0",
       paidFetch,
     });
-    return { text: snap.text, fetcher: snap.fetcher, payment: snap.payment };
+    return { text: snap.text, fetcher: snap.fetcher, payment: snap.payment, snapshot: snap };
   } catch (err: any) {
     const msg = err instanceof EvidenceFetchError
       ? err.message
@@ -346,15 +354,39 @@ function verdictToSide(
 const KELLY_CAP = 0.25;
 
 /**
- * Hash evidence content for on-chain verification.
+ * Hash evidence for on-chain verification.
  *
- * SHA-256, which is what `env.crypto().sha256()` computes inside a Soroban
- * contract — so the digest stored in `evidence_hash` is one the chain itself could
- * recompute. keccak256 has no host-function counterpart on Soroban and would have
- * been unverifiable.
+ * When `MIMIR_FEATURE_EVIDENCE_HASH_BINDING` is enabled (the default) AND the
+ * snapshot carried raw bytes from the HTTP response, the hash is
+ * SHA-256(rawBytes) — i.e. the same bytes any third party gets by re-fetching
+ * the URL and hashing the body. This binding is verifiable without knowing
+ * Mimir's HTML-strip or truncation logic.
+ *
+ * When the flag is off, or when raw bytes are unavailable (CoinGecko synthetic
+ * text, council JSON tally, or a fetch failure fallback), the hash falls back to
+ * SHA-256(commit) where `commit` is the text string — the pre-migration
+ * behaviour.
+ *
+ * In council / self-resolving mode the caller passes the combined
+ * `evidence.text + council JSON` as `commit` and passes `undefined` as
+ * `snapshot`. The tally JSON has no corresponding raw bytes, so the hash is
+ * necessarily over text; this is documented on the on-chain receipt. Verifiers
+ * must reproduce both the evidence text AND the council tally to check the hash.
+ *
+ * SHA-256 is what `env.crypto().sha256()` computes inside a Soroban contract —
+ * so a contract could verify the digest. keccak256 has no host-function
+ * counterpart on Soroban and would have been unverifiable.
  */
-function hashEvidence(evidence: string): string {
-  return sha256Hex(evidence);
+function hashEvidence(
+  commit: string,
+  snapshot?: EvidenceSnapshot,
+): string {
+  const featureEnabled = isFeatureEnabled("evidence_hash_binding");
+  if (snapshot) {
+    return evidenceHashFromSnapshot(snapshot, featureEnabled, commit);
+  }
+  // No snapshot (council mode fallback text or failure text): legacy text hash.
+  return sha256Hex(commit);
 }
 
 // Confidence tiers govern how the oracle commits a verdict.
@@ -476,6 +508,11 @@ async function settle(claim: ClaimOnChain): Promise<boolean> {
   let rawVerdict: OracleVerdict;
   let commit = evidence.text;
   let bonusVotes: CouncilVote[] | null = null;
+  // Council settlement appends an oracle-synthetic tally JSON to the commit.
+  // This tally has no corresponding raw bytes, so in council mode the hash
+  // necessarily covers text + tally and is passed with `snapshot = undefined`.
+  // Solo settlement uses raw bytes when available.
+  let councilMode = false;
   if (COUNCIL_SETTLEMENT) {
     const council = await gatherCouncilVerdict({
       claimId:       claim.id,
@@ -504,11 +541,13 @@ async function settle(claim: ClaimOnChain): Promise<boolean> {
       rawVerdict = reference;
       commit = `${evidence.text}\n[council]${JSON.stringify({ tally: council.tally, q: council.qHistory, refQ: Number(referenceQ.toFixed(4)), scores })}`;
       bonusVotes = council.votes;
+      councilMode = true;
     } else if (council) {
       const paidUsdc = unitsToUsdc(council.totalPaidUnits);
       console.log(`[settle] 🏛️  Council ${council.tally.creator}–${council.tally.challengers} (${council.tally.draw + council.tally.unresolvable} abstain) · paid ${paidUsdc.toFixed(6)} USDC to jurors`);
       rawVerdict = { verdict: council.verdict, confidence: council.confidence, explanation: council.explanation };
       commit = `${evidence.text}\n[council]${JSON.stringify(council.tally)}`;
+      councilMode = true;
     } else {
       console.log(`[settle] Council quorum/fallback gate — settling solo.`);
       rawVerdict = await evaluateClaim(claim, evidence.text);
@@ -517,7 +556,12 @@ async function settle(claim: ClaimOnChain): Promise<boolean> {
     rawVerdict = await evaluateClaim(claim, evidence.text);
   }
 
-  const evidenceHash = hashEvidence(commit);
+  // Solo mode: hash binds to rawBytes when available (the binding flag is checked
+  // inside hashEvidence). Council mode: the synthetic tally JSON makes raw-byte
+  // binding impossible, so the hash covers the text+tally commit string.
+  const evidenceHash = councilMode
+    ? hashEvidence(commit, undefined)   // synthetic council commit — no raw bytes
+    : hashEvidence(commit, evidence.snapshot); // prefer raw bytes when present
   const trusted      = applyFetcherTrust(rawVerdict, evidence.fetcher);
   const verdict      = tierVerdict(trusted);
 
@@ -526,8 +570,11 @@ async function settle(claim: ClaimOnChain): Promise<boolean> {
     verdict.explanation !== rawVerdict.explanation ? "CONTESTED" :
     "FIRM";
 
+  // Log whether the hash bound to raw bytes or fell back to text.
+  const bytesAvailable = !councilMode && evidence.snapshot?.rawBytes !== undefined;
+  const hashSource = bytesAvailable ? "raw-bytes" : "text";
   console.log(`[settle] Verdict: ${verdict.verdict} (${verdict.confidence}%) [${tierTag}]`);
-  console.log(`[settle] Evidence hash: ${evidenceHash}`);
+  console.log(`[settle] Evidence hash: ${evidenceHash} [source=${hashSource}]`);
   console.log(`[settle] "${verdict.explanation.slice(0, 100)}..."`);
 
   // Resolution ESCROWS the challenger side rather than paying it: a Stellar
