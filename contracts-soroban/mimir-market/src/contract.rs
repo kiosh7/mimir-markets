@@ -10,7 +10,7 @@ use crate::resolve;
 use crate::storage;
 use crate::types::{
     Challenger, ChallengerPage, Claim, ClaimFeeView, CreateParams, Error, FeePolicy, MarketConfig,
-    PayoutQuote, PendingFeePolicy, PlatformStats, WinnerSide,
+    PayoutQuote, PendingFeePolicy, PlatformStats, WinnerSide, MAX_BATCH_CLAIMS,
 };
 
 #[contract]
@@ -134,6 +134,36 @@ impl MimirMarket {
 
     pub fn get_claim(env: Env, claim_id: u64) -> Result<Claim, Error> {
         storage::get_claim(&env, claim_id)
+    }
+
+    /// Batch-read up to [`MAX_BATCH_CLAIMS`] claims in a single call.
+    ///
+    /// Returns one `Option<Claim>` per input ID, preserving positional
+    /// correspondence: `result[i]` is `Some(claim)` when `claim_ids[i]` exists,
+    /// or `None` when it does not. Duplicate IDs are resolved independently and
+    /// each matching slot is populated.
+    ///
+    /// The call is pure-read: no auth, no money movement, no events. TTL is
+    /// extended on every claim found (same bump applied by [`get_claim`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ClaimBatchTooLarge`] when `claim_ids.len()` exceeds
+    /// [`MAX_BATCH_CLAIMS`]. An empty `claim_ids` slice is valid and returns an
+    /// empty vector.
+    pub fn batch_get_claims(env: Env, claim_ids: Vec<u64>) -> Result<Vec<Option<Claim>>, Error> {
+        if claim_ids.len() > MAX_BATCH_CLAIMS {
+            return Err(Error::ClaimBatchTooLarge);
+        }
+        let mut results: Vec<Option<Claim>> = Vec::new(&env);
+        for id in claim_ids.iter() {
+            match storage::get_claim(&env, id) {
+                Ok(claim) => results.push_back(Some(claim)),
+                Err(Error::ClaimNotFound) => results.push_back(None),
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(results)
     }
 
     pub fn get_claim_market_config(env: Env, claim_id: u64) -> Result<MarketConfig, Error> {
