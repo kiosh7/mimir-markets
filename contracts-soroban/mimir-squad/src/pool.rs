@@ -241,6 +241,38 @@ pub fn withdraw_before_deadline(
     Ok(())
 }
 
+
+pub fn transition_deadline(env: &Env, market_id: u64) -> Result<(), Error> {
+    let mut market = storage::get_market(env, market_id)?;
+    if market.resolved {
+        return Err(Error::Locked);
+    }
+    if env.ledger().timestamp() < market.deadline {
+        return Err(Error::Locked);
+    }
+    if market.pool_a > 0 && market.pool_b > 0 {
+        return Err(Error::Locked);
+    }
+
+    market.resolved = true;
+    market.result = RESULT_CANCELLED;
+    market.remaining_escrow = market
+        .pool_a
+        .checked_add(market.pool_b)
+        .ok_or(Error::Overflow)?;
+    assert_market_conservation(&market)?;
+    storage::set_market(env, market_id, &market);
+
+    events::Resolved {
+        market_id,
+        result: RESULT_CANCELLED,
+        pool_a: market.pool_a,
+        pool_b: market.pool_b,
+    }
+    .publish(env);
+    Ok(())
+}
+
 pub fn resolve(env: &Env, market_id: u64, result: u32) -> Result<(), Error> {
     storage::oracle(env)?.require_auth();
 

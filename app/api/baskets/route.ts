@@ -47,7 +47,11 @@ function clientIp(req: NextRequest): string | undefined {
   return req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || undefined;
 }
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const gate = authorizeRequest("public_read", { route: "/api/baskets", ip: clientIp(req) });
+  if (!gate.allowed && gate.error) {
+    return NextResponse.json(gate.error.body, { status: gate.error.status, headers: gate.error.headers });
+  }
   const baskets = await listBaskets().catch(() => []);
   return NextResponse.json({ baskets }, { headers: { "cache-control": "no-store" } });
 }

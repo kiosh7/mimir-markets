@@ -36,6 +36,7 @@ import { useExploreFilterState } from "@/hooks/useExploreFilterState";
 import PageTransition, { AnimatedItem } from "@/components/PageTransition";
 import { ArenaCardSkeleton } from "@/components/ui";
 import ArenaCard from "@/components/ArenaCard";
+import MarketCardGrid from "@/components/MarketCardGrid";
 import EmptyState from "@/components/EmptyState";
 import ExploreArenaEmptyState from "@/components/explorer/ExploreArenaEmptyState";
 import ExploreFilteredEmptyState from "@/components/explorer/ExploreFilteredEmptyState";
@@ -543,7 +544,10 @@ export default function ExploreClient() {
     }
 
     return (
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      <MarketCardGrid
+        aria-label="Settled market cards"
+        className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3"
+      >
         {filteredClosedChallenges.map((vs) => (
           <motion.div
             key={vs.id}
@@ -561,7 +565,7 @@ export default function ExploreClient() {
             />
           </motion.div>
         ))}
-      </div>
+      </MarketCardGrid>
     );
   };
 
@@ -601,7 +605,10 @@ export default function ExploreClient() {
     }
 
     return (
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      <MarketCardGrid
+        aria-label="Open market cards"
+        className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3"
+      >
         {filteredOpenChallenges.map((vs) => (
           <motion.div
             key={vs.id}
@@ -619,7 +626,7 @@ export default function ExploreClient() {
             />
           </motion.div>
         ))}
-      </div>
+      </MarketCardGrid>
     );
   };
 

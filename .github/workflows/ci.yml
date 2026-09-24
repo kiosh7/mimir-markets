@@ -37,6 +37,7 @@ jobs:
       - run: npm run test:contracts
       - run: cargo build --manifest-path contracts-soroban/Cargo.toml --release --target wasm32v1-none
       - run: npm run verify:artifacts -- --require-built
+      - run: npm run verify:cache-backup -- tests/fixtures/cache-backup/valid.json
       - run: npm run test:smoke
       - run: npm run build
 

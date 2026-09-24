@@ -7,9 +7,9 @@ import {
 import { getAgentTradeRows, getSyncMeta } from "@/lib/db";
 import type { PortfolioPerformanceResponse } from "@/lib/portfolio-performance";
 import {
-  createApiError,
   parseAddressParam,
 } from "@/lib/server/api-validation";
+import { apiError } from "@/lib/api/errors";
 import { buildVSCacheFreshness } from "@/lib/vs-freshness";
 
 export const dynamic = "force-dynamic";
@@ -31,10 +31,8 @@ export async function GET(
   const { address: rawAddress } = await params;
   const address = parseAddressParam(rawAddress);
   if (!address) {
-    return NextResponse.json(
-      createApiError("invalid_parameter", "Invalid address"),
-      { status: 400, headers: { "Cache-Control": "no-store" } },
-    );
+    const err = apiError("invalid_request", "Invalid address", { field: "address" });
+    return NextResponse.json(err.body, { status: err.status, headers: { ...err.headers, "Cache-Control": "no-store" } });
   }
 
   try {
@@ -60,9 +58,8 @@ export async function GET(
       headers: { "Cache-Control": "no-store" },
     });
   } catch {
-    return NextResponse.json(
-      createApiError("internal_error", "Unable to load portfolio performance"),
-      { status: 503, headers: { "Cache-Control": "no-store" } },
-    );
+    const err = apiError("upstream_unavailable", "Unable to load portfolio performance");
+    return NextResponse.json(err.body, { status: err.status, headers: { ...err.headers, "Cache-Control": "no-store" } });
   }
 }
+

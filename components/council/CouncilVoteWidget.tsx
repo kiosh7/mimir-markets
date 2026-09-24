@@ -19,9 +19,12 @@ import {
   beginAsyncPanelLoad,
   canCommitAsyncPanelPayload,
   createAsyncPanelState,
+  markAsyncPanelStale,
   settleAsyncPanelLoad,
   shouldShowAsyncPanelSkeleton,
 } from "@/lib/asyncPanelLoading";
+import CacheFreshnessPill from "@/components/CacheFreshnessPill";
+import type { VSCacheFreshness } from "@/lib/vs-freshness";
 
 interface PersonaVote {
   slug:        string;
@@ -121,6 +124,13 @@ export default function CouncilVoteWidget({ claimId }: { claimId: number }) {
     };
   }, [claimId]);
 
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setPanel((prev) => markAsyncPanelStale(prev, Date.now()));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
   if (shouldShowAsyncPanelSkeleton(panel)) {
     return <CouncilPanelSkeleton />;
   }
@@ -136,11 +146,18 @@ export default function CouncilVoteWidget({ claimId }: { claimId: number }) {
   return (
     <section className="rounded-2xl border border-pv-border/30 bg-pv-surface/70 p-5 lg:min-h-[20rem]">
       <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
-        <div>
-          <div className="text-[11px] font-mono uppercase tracking-[0.18em] text-pv-emerald">Council verdict</div>
-          <p className="mt-0.5 text-[12px] text-pv-muted">
-            Where each of the {data.total} AI personas stands on this claim. ✓ means they staked the challenger side.
-          </p>
+        <div className="flex items-center gap-3">
+          <div>
+            <div className="text-[11px] font-mono uppercase tracking-[0.18em] text-pv-emerald">Council verdict</div>
+            <p className="mt-0.5 text-[12px] text-pv-muted">
+              Where each of the {data.total} AI personas stands on this claim. ✓ means they staked the challenger side.
+            </p>
+          </div>
+          {data.cache ? (
+            <div className="ml-auto flex items-center gap-2">
+              <CacheFreshnessPill freshness={panel.phase === "stale" ? { ...data.cache, status: "stale" } : data.cache} />
+            </div>
+          ) : null}
         </div>
         <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-pv-muted">
           {data.stakedCount} of {data.total} staked · {data.totalUsdc.toFixed(2)} USDC

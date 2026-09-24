@@ -84,6 +84,13 @@ import PageTransition, { AnimatedItem } from "@/components/PageTransition";
 import { GlassCard, Button, Input, ListboxField } from "@/components/ui";
 import ClaimStrengthCard from "@/components/ClaimStrengthCard";
 import CreateChallengeTicket from "@/components/vs/CreateChallengeTicket";
+import {
+  CREATE_DESKTOP_CTA_WRAP_CLASS,
+  CREATE_MOBILE_CTA_BAR_CLASS,
+  CREATE_PAGE_SHELL_CLASS,
+  CREATE_STAKE_CUSTOM_CELL_CLASS,
+  CREATE_STAKE_PRESET_GRID_CLASS,
+} from "@/lib/createFormResponsive";
 import { BlueprintHeading } from "@/components/BlueprintGrid";
 import CreateMockFundingOverlay, {
   type CreateMockOverlayPhase,
@@ -1352,7 +1359,7 @@ export default function CreatePage() {
         subtitleSuccess={t("mockOverlaySuccessHint")}
       />
       <PageTransition>
-      <div className="mx-auto w-full max-w-[1280px] px-4 pb-12 sm:px-6">
+      <div className={CREATE_PAGE_SHELL_CLASS}>
         <AnimatedItem>
           <div className="mb-8 w-full sm:mb-10">
           {rematchId && (
@@ -1814,7 +1821,7 @@ export default function CreatePage() {
                 </span>
                 {t("stakeSectionTitle")}
               </h3>
-              <div className="grid grid-cols-5 gap-2">
+              <div className={CREATE_STAKE_PRESET_GRID_CLASS}>
                 {STAKE_PRESET_AMOUNTS.map((amount) => (
                   <motion.button
                     key={amount}
@@ -1834,7 +1841,7 @@ export default function CreatePage() {
                   </motion.button>
                 ))}
                 <div
-                  className={`flex min-h-[2.75rem] w-full min-w-0 items-center justify-center rounded-lg border px-1.5 py-1.5 transition-[border-color,background-color,color,box-shadow] sm:min-h-[3.25rem] sm:px-2 sm:py-2 ${
+                  className={`flex ${CREATE_STAKE_CUSTOM_CELL_CLASS} items-center justify-center rounded-lg border px-1.5 py-1.5 transition-[border-color,background-color,color,box-shadow] sm:min-h-[3.25rem] sm:px-2 sm:py-2 ${
                     customStakeFocused || !isPresetStakeAmount(stake)
                       ? "border-pv-emerald bg-pv-emerald/[0.12] text-pv-emerald shadow-[0_0_16px_-8px_rgba(51,79,169,0.3)]"
                       : "border border-pv-ink/[0.12] bg-pv-surface text-pv-muted"
@@ -2407,6 +2414,7 @@ export default function CreatePage() {
                     </div>
                   </div>
                 ) : null}
+                <div className={CREATE_DESKTOP_CTA_WRAP_CLASS}>
                 {isConnected || isCreateDemoSession ? (
                   <Button
                     variant="primary"
@@ -2445,9 +2453,53 @@ export default function CreatePage() {
                 <p className="text-center text-[9px] font-bold uppercase tracking-widest text-pv-muted/55 leading-snug">
                   {t("ticketSignatureNote")}
                 </p>
+                </div>
               </div>
             </AnimatedItem>
           </aside>
+        </div>
+
+        <div className={CREATE_MOBILE_CTA_BAR_CLASS} data-testid="create-mobile-cta">
+          <div className="mx-auto flex w-full max-w-[1280px] flex-col gap-2">
+            {isConnected || isCreateDemoSession ? (
+              <Button
+                variant="primary"
+                onClick={handleSubmit}
+                loading={
+                  loading ||
+                  mockOverlayPhase === "loading" ||
+                  moderationLoading
+                }
+                disabled={isFormMockBusy || moderationLoading}
+                className="min-h-[44px] rounded-2xl py-4 font-display text-sm font-bold uppercase tracking-widest"
+              >
+                {mockOverlayPhase === "loading" || loading ? (
+                  mockOverlayPhase === "loading"
+                    ? t("mockOverlayFunding")
+                    : t("funding")
+                ) : (
+                  <>
+                    <span>
+                      {rematchId
+                        ? t("createRematchAndFund", { amount: stake })
+                        : t("createAndFund", { amount: stake })}
+                    </span>
+                    <Zap className="size-5 shrink-0" aria-hidden />
+                  </>
+                )}
+              </Button>
+            ) : (
+              <Button
+                onClick={connect}
+                className="min-h-[44px] rounded-2xl py-4 font-display text-sm font-bold uppercase tracking-widest"
+              >
+                {t("connectWallet")}
+              </Button>
+            )}
+            <p className="text-center text-[9px] font-bold uppercase tracking-widest text-pv-muted/55 leading-snug">
+              {t("ticketSignatureNote")}
+            </p>
+          </div>
         </div>
       </div>
     </PageTransition>

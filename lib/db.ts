@@ -323,6 +323,10 @@ const SCHEMA_STATEMENTS: SqlStatement[] = [
   )` },
   { sql: "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_api_keys_hash ON agent_api_keys(key_hash)" },
   { sql: "CREATE INDEX IF NOT EXISTS idx_agent_api_keys_agent ON agent_api_keys(agent_id)" },
+  // Rotation support: keys can now carry an expiry so the old key stays valid
+  // through the overlap window after rotation. Idempotent ALTER TABLE: Postgres
+  // ignores the statement when the column already exists.
+  { sql: "ALTER TABLE agent_api_keys ADD COLUMN IF NOT EXISTS expires_at BIGINT" },
   { sql: `CREATE TABLE IF NOT EXISTS agent_spend_permissions (
     permission_hash TEXT PRIMARY KEY,
     agent_id TEXT NOT NULL,
@@ -2047,10 +2051,10 @@ export async function insertAgentApiKey(record: AgentApiKeyRecord): Promise<void
   const pool = await getDb();
   await execute(pool, {
     sql: `INSERT INTO agent_api_keys (
-      key_id, agent_id, key_hash, key_prefix, label, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?)`,
+      key_id, agent_id, key_hash, key_prefix, label, created_at, expires_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
     args: [record.keyId, record.agentId, record.keyHash, record.keyPrefix,
-      record.label, record.createdAt],
+      record.label, record.createdAt, record.expiresAt ?? null],
   });
 }
 
@@ -2063,6 +2067,7 @@ function toApiKeyRecord(row: Record<string, unknown>): AgentApiKeyRecord {
     label: getString(row.label),
     createdAt: getNumber(row.created_at),
     lastUsedAt: row.last_used_at == null ? undefined : getNumber(row.last_used_at),
+    expiresAt: row.expires_at == null ? undefined : getNumber(row.expires_at),
     revokedAt: row.revoked_at == null ? undefined : getNumber(row.revoked_at),
     revokedReason: row.revoked_reason == null ? undefined : getString(row.revoked_reason),
   };
@@ -2111,6 +2116,28 @@ export async function revokeAgentApiKey(
       WHERE key_id = ? AND agent_id = ? AND revoked_at IS NULL
       RETURNING key_id`,
     args: [at, reason, keyId, agentId],
+  });
+  return result.rows.length > 0;
+}
+
+/**
+ * Set (or clear) the expiry on an existing key without revoking it.
+ *
+ * Used by `rotateKey` to schedule the outgoing key's expiry at `now +
+ * overlap_ms`. An already-revoked key is not modified — revocation takes
+ * precedence and the key is already inaccessible.
+ *
+ * Returns `true` when a row was found and updated.
+ */
+export async function setAgentApiKeyExpiry(
+  agentId: string, keyId: string, expiresAt: number | null,
+): Promise<boolean> {
+  const pool = await getDb();
+  const result = await execute(pool, {
+    sql: `UPDATE agent_api_keys SET expires_at = ?
+      WHERE key_id = ? AND agent_id = ? AND revoked_at IS NULL
+      RETURNING key_id`,
+    args: [expiresAt, keyId, agentId],
   });
   return result.rows.length > 0;
 }

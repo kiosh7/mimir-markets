@@ -29,10 +29,16 @@ See `docs/STELLAR_NETWORK.md` for the one-page architecture reference.
 | `agents/oracle/index.ts` | Off-chain AI oracle agent (LLM + local keypair) |
 | `agents/market-creator/index.ts` | Autonomous market creator (LLM + local keypair) |
 | `agents/council/` | Ten AI personas that stake as economic actors |
+| `fixtures/ledger/` | Versioned public-chain captures for deterministic offline replay |
 | `deploy/deploy.ts` | Soroban build/deploy/initialize script |
 | `deploy/contract-artifacts.manifest.json` | Pinned Wasm digests for fail-closed provenance checks |
 | `lib/ops/artifact-provenance.ts` | Offline SHA-256 artifact provenance verifier |
+| `lib/ops/cache-backup.ts` | Offline read-index cache-backup verifier (checksum + privacy, no network) |
+| `lib/server/read-index-backup.ts` | DB-backed read-index dump / verified restore (restore fingerprint check) |
 | `scripts/verify-artifact-provenance.ts` | CLI: verify or `--write-pins` contract artifacts |
+| `scripts/verify-cache-backup.ts` | CLI: offline cache-backup verification (`npm run verify:cache-backup`) |
+| `scripts/backup-read-index.ts` | CLI: dump the Neon read-index to a self-verified archive |
+| `scripts/restore-read-index.ts` | CLI: restore a verified archive and fingerprint-check the cache |
 | `scripts/stellar-keys.ts` | Keypairs + Friendbot funding + USDC trustline |
 | `scripts/create-agent-wallets.ts` | Generate 12 keypairs (oracle + creator + 10 personas) |
 | `scripts/fund-agents.ts` | Fund agent accounts from a master seed |
@@ -107,6 +113,8 @@ add a page, a wallet gate, or an env-read, keep it green:
 - When a contract in `contracts-soroban/` changes, regenerate bindings
   (`npm run stellar:bindings`) and keep `lib/contract.ts` in sync.
 - Categories: `sports`, `weather`, `crypto`, `culture`, `custom` (English).
+- Sync/read-index changes must pass `npm run check:ledger-fixture`; see
+  `docs/LEDGER_REPLAY.md` for artifact, secret, release, and rollback policy.
 
 ## Oracle agent
 
@@ -149,3 +157,36 @@ https://faucet.circle.com
 Explorer: https://stellar.expert/explorer/testnet
 Public endpoints (rate-limited): https://soroban-testnet.stellar.org and
 https://horizon-testnet.stellar.org
+
+## Read-index cache backup / restore (devx)
+
+The Neon read-index is a cache, so its backup workflow is deliberately
+**verifiable without any network credentials** — that is what makes the safety
+property testable on a clean checkout and in CI.
+
+- **Backup** (`npm run backup:read-index -- --out backups/x.json`) needs only
+  `DATABASE_URL`. It dumps the projection tables (`claims`, `challengers`,
+  `sync_meta`, `market_settlements`, `fee_accruals`, `fee_claims`,
+  `fee_policies`, `agent_revenue_attribution`) and refuses to emit a byte unless
+  its own checksum and privacy invariants pass. No seeds, no RPC, no LLM keys.
+- **Verify** (`npm run verify:cache-backup -- <file>`) is a pure SHA-256 +
+  schema + privacy check (`lib/ops/cache-backup.ts`). Fail-closed findings:
+  `BACKUP_INVALID`, `BACKUP_KIND_MISMATCH`, `BACKUP_SCHEMA_UNSUPPORTED`,
+  `BACKUP_MISSING_TABLE`, `BACKUP_UNKNOWN_TABLE`, `BACKUP_EMPTY`,
+  `BACKUP_CHECKSUM_MISMATCH`, `BACKUP_PRIVATE_CONTENT_LEAK`. A private claim's
+  scrubbed content fields must stay `null` in the archive.
+- **Restore** (`npm run restore:read-index -- <file> [--dry-run]`) requires
+  `DATABASE_URL`. An unverified archive is refused before any write; writes run
+  in one transaction so a failure rolls back; afterwards the cache is re-read
+  and its fingerprint is compared against the archive's checksum.
+- **Rollback**: restore any verified archive, or — because contract state is
+  the source of truth — re-warm from chain (`npm run warm:vs-index` / `npm run
+  sync`). Restoring never writes to the chain.
+- **Adding a table/column to the projection**: update `TABLE_SPECS` in
+  `lib/server/read-index-backup.ts` **and** the regression-pinned
+  `READ_INDEX_TABLES` list in `lib/ops/cache-backup.ts`, then regenerate the
+  `valid.json` fixture. A column added to Postgres but not to `TABLE_SPECS` is
+  intentionally never backed up — this is a feature (a secret-shaped column
+  cannot sneak into archives) and it fails loud if you forget to wire it.
+- Never commit real archives to the repo. The committed fixture in
+  `tests/fixtures/cache-backup/valid.json` is synthetic.

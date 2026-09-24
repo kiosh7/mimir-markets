@@ -599,3 +599,46 @@ fn an_unknown_market_reads_as_not_found() {
     assert_eq!(f.client().get_deposit(&9, &SIDE_A, &stranger), 0);
     assert!(!f.client().has_claimed(&9, &SIDE_A, &stranger));
 }
+
+
+#[test]
+fn transition_deadline_works_for_underfunded() {
+    let f = Fixture::new();
+    let captain = f.user(0);
+    let a1 = f.user(100 * USDC);
+    let id = f.market(&captain, 0);
+    f.client().deposit(&a1, &id, &SIDE_A, &(10 * USDC));
+
+    // Too early
+    let err = f.client().try_transition_deadline(&id).unwrap_err().unwrap();
+    assert_eq!(err, Error::Locked);
+
+    f.advance_by(DEFAULT_DURATION);
+    
+    // Now past deadline. Only SIDE_A is funded. Should transition to Cancelled.
+    f.client().transition_deadline(&id);
+    let m = f.client().get_market(&id);
+    assert!(m.resolved);
+    assert_eq!(m.result, RESULT_CANCELLED);
+    
+    // Refund
+    f.client().claim(&a1, &id, &SIDE_A);
+    assert_eq!(f.token().balance(&a1), 100 * USDC);
+}
+
+#[test]
+fn transition_deadline_rejected_if_funded() {
+    let f = Fixture::new();
+    let captain = f.user(0);
+    let a1 = f.user(100 * USDC);
+    let b1 = f.user(100 * USDC);
+    let id = f.market(&captain, 0);
+    f.client().deposit(&a1, &id, &SIDE_A, &(10 * USDC));
+    f.client().deposit(&b1, &id, &SIDE_B, &(10 * USDC));
+
+    f.advance_by(DEFAULT_DURATION);
+    
+    // Both sides funded, cannot transition
+    let err = f.client().try_transition_deadline(&id).unwrap_err().unwrap();
+    assert_eq!(err, Error::Locked);
+}

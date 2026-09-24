@@ -99,6 +99,11 @@ impl MimirMarket {
         resolve::resolve_claim(&env, claim_id, winner_side, summary, confidence, evidence_hash)
     }
 
+    
+    pub fn transition_deadline(env: Env, claim_id: u64) -> Result<(), Error> {
+        claims::transition_deadline(&env, claim_id)
+    }
+
     pub fn cancel_claim(env: Env, claim_id: u64) -> Result<(), Error> {
         claims::cancel_claim(&env, claim_id)
     }

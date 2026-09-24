@@ -4,9 +4,11 @@ export const AGENT_API_VERSION = "v1";
 export const AGENT_API_ACTIONS = [
   "register", "heartbeat", "proposeMarket", "createMarket", "publishReasoning",
   "vote", "stake", "listPositions", "listEarnings", "revoke", "dryRun",
-  // Credential and budget management. issueKey/revokeKey and grantSpend are
-  // owner-signed; the rest an agent may call with its own key.
-  "issueKey", "listKeys", "revokeKey", "grantSpend", "revokeSpend", "spendStatus",
+  // Credential and budget management. issueKey/revokeKey/rotateKey and grantSpend
+  // are owner-signed; the rest an agent may call with its own key.
+  // rotateKey issues a fresh key and schedules the old one's expiry so both are
+  // valid during the overlap window — callers have time to update their credential.
+  "issueKey", "listKeys", "revokeKey", "rotateKey", "grantSpend", "revokeSpend", "spendStatus",
 ] as const;
 export type AgentApiAction = (typeof AGENT_API_ACTIONS)[number];
 

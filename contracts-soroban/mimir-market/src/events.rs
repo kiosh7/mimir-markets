@@ -35,11 +35,32 @@ pub struct ClaimResolved {
     pub evidence_hash: BytesN<32>,
 }
 
+/// The creator's refund of an unchallenged claim. `refund` lets an indexer
+/// reconcile the refund against `creator_stake` and escrow without a second
+/// read; `parked` distinguishes a delivered refund from one parked as a
+/// withdrawable balance when the creator's trustline refused the transfer.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClaimCancelled {
     #[topic]
     pub id: u64,
+    pub refund: i128,
+    pub parked: bool,
+}
+
+/// Defensive halt: the claim's accounting shows counterparty funds or a
+/// reserved creator liability while its lifecycle state claims to be `Open`.
+/// The cancellation was refused and NOTHING changed — this event is the
+/// on-chain record for keepers, indexers and incident response.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CancellationRefused {
+    #[topic]
+    pub id: u64,
+    pub challenger_count: u32,
+    pub total_challenger_stake: i128,
+    pub reserved_creator_liability: i128,
+    pub reason: u32,
 }
 
 #[contractevent]
