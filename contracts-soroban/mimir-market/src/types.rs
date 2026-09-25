@@ -7,6 +7,19 @@ use soroban_sdk::{contracterror, contracttype, Address, BytesN, String};
 
 pub const MAX_CHALLENGERS: u32 = 100;
 
+/// Maximum number of claim ids accepted by `get_claims_batch` in a single call.
+///
+/// Soroban transactions have a bounded ledger-entry footprint: each claim id in
+/// the batch opens one persistent entry (`DataKey::Claim(id)`). At 50 ids the
+/// simulated footprint stays well inside the limits that the public Soroban RPC
+/// enforces; callers that need more claims should make multiple calls or use the
+/// existing range-read path.
+///
+/// Chosen conservatively: the challenge-roster key (`DataKey::Challengers(id)`)
+/// is NOT read by this function, which deliberately keeps the footprint O(n) in
+/// ids rather than O(n × roster-size).
+pub const MAX_BATCH_SIZE: u32 = 50;
+
 /// Decimals of the escrow token. A Stellar Asset Contract exposes every classic
 /// asset, Circle's USDC included, with exactly 7.
 ///
@@ -351,4 +364,10 @@ pub enum Error {
     /// verdict is refused rather than reinterpreted, so resolution fails closed
     /// and the claim is left untouched.
     UnsupportedVerdictVersion = 40,
+    /// The `ids` vector passed to `get_claims_batch` exceeded `MAX_BATCH_SIZE`.
+    ///
+    /// Callers must split large id sets into chunks of at most `MAX_BATCH_SIZE`
+    /// before invoking the function. The limit exists to bound the ledger-entry
+    /// footprint of a single simulated transaction.
+    BatchTooLarge = 41,
 }

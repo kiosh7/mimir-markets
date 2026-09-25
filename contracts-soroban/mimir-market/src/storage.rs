@@ -166,6 +166,27 @@ pub fn get_claim(env: &Env, id: u64) -> Result<Claim, Error> {
     Ok(claim)
 }
 
+/// Return `Some(claim)` if the entry exists, `None` if it does not.
+///
+/// Unlike [`get_claim`], a miss does NOT bump the TTL (there is nothing to
+/// extend) and does NOT return an error, so it is the right primitive for
+/// batch reads where a missing id is a normal, non-fatal answer.
+///
+/// A present entry still receives its usual TTL extension so an open market
+/// cannot expire while a batch is being constructed.
+pub fn get_claim_opt(env: &Env, id: u64) -> Option<Claim> {
+    let key = DataKey::Claim(id);
+    match env.storage().persistent().get::<_, Claim>(&key) {
+        Some(claim) => {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, BUMP_THRESHOLD, BUMP_EXTEND);
+            Some(claim)
+        }
+        None => None,
+    }
+}
+
 pub fn set_claim(env: &Env, id: u64, claim: &Claim) {
     let key = DataKey::Claim(id);
     env.storage().persistent().set(&key, claim);
