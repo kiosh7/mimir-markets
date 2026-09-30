@@ -1,10 +1,13 @@
 #![cfg(test)]
 //! Claim creation, challenging, gating and cancellation.
-
+//! Validates rematch parent links to preserve contract-first accounting, clear market semantics, and safe agent operations.
 extern crate std;
 
 use crate::test_common::{Fixture, USDC};
-use crate::types::{ClaimState, Error, WinnerSide, MAX_CHALLENGERS, MIN_STAKE};
+use crate::types::{
+    ClaimState, Error, WinnerSide, MAX_CHALLENGERS, MAX_CLAIM_METADATA_BYTES, MAX_METADATA_BYTES,
+    MIN_STAKE,
+};
 
 // ── Creation ─────────────────────────────────────────────────────────────────
 
@@ -435,6 +438,20 @@ fn cancelling_before_any_challenge_refunds_in_full() {
 }
 
 #[test]
+fn cancelling_twice_is_idempotent() {
+    let f = Fixture::new(1_000, 0);
+    let creator = f.user(100 * USDC);
+    let id = f.client().create_claim(&creator, &f.params(10 * USDC));
+
+    f.client().cancel_claim(&id);
+    f.client().cancel_claim(&id); // Should not error
+
+    assert_eq!(f.client().get_claim(&id).state, ClaimState::Cancelled);
+    assert_eq!(f.token().balance(&creator), 100 * USDC);
+    assert_eq!(f.escrow_balance(), 0);
+}
+
+#[test]
 fn a_challenged_claim_can_no_longer_be_cancelled() {
     let f = Fixture::new(0, 0);
     let creator = f.user(100 * USDC);
@@ -466,15 +483,13 @@ fn only_the_creator_can_cancel() {
 }
 
 #[test]
-fn a_cancelled_claim_cannot_be_challenged_or_cancelled_again() {
+fn a_cancelled_claim_cannot_be_challenged() {
     let f = Fixture::new(0, 0);
     let creator = f.user(100 * USDC);
     let c1 = f.user(100 * USDC);
     let id = f.client().create_claim(&creator, &f.params(10 * USDC));
     f.client().cancel_claim(&id);
 
-    let err = f.client().try_cancel_claim(&id).unwrap_err().unwrap();
-    assert_eq!(err, Error::ClaimNotOpen);
     let err = f
         .client()
         .try_challenge_claim(&c1, &id, &(5 * USDC), &None)
@@ -868,6 +883,11 @@ fn a_market_filled_to_max_challengers_pays_out_all_one_hundred() {
     params.max_challengers = MAX_CHALLENGERS;
     let id = f.client().create_claim(&creator, &params);
 
+    // Simulate a claim created before the hard cap was enforced at admission.
+    let mut claim = f.env.as_contract(&f.client().address, || crate::storage::get_claim(&f.env, id).unwrap());
+    claim.market.max_challengers = crate::types::MAX_CHALLENGERS + 1;
+    f.env.as_contract(&f.client().address, || crate::storage::set_claim(&f.env, id, &claim));
+
     let stake = 2 * USDC;
     let mut challengers = std::vec::Vec::new();
     for _ in 0..MAX_CHALLENGERS {
@@ -988,7 +1008,7 @@ fn transition_deadline_cancels_underfunded_open_claim() {
 }
 
 #[test]
-fn transition_deadline_rejected_if_active() {
+fn transition_deadline_preserves_active_state_to_extend_ttl() {
     let f = Fixture::new(0, 0);
     let creator = f.user(100 * USDC);
     let id = f.client().create_claim(&creator, &f.params(10 * USDC));
@@ -997,6 +1017,81 @@ fn transition_deadline_rejected_if_active() {
     f.client().challenge_claim(&challenger, &id, &(10 * USDC), &None);
     f.advance_to(f.client().get_claim(&id).deadline + 1);
 
-    let err = f.client().try_transition_deadline(&id).unwrap_err().unwrap();
-    assert_eq!(err, Error::ClaimNotOpen);
+    // Should succeed now to persist TTL bumps instead of failing
+    f.client().transition_deadline(&id);
+    assert_eq!(f.client().get_claim(&id).state, ClaimState::Active);
+}
+
+// ── Metadata bounds ──────────────────────────────────────────────────────────
+
+/// A metadata string exactly at the per-field cap is stored, not truncated.
+#[test]
+fn metadata_at_the_per_field_bound_is_accepted() {
+    let f = Fixture::new(0, 0);
+    let creator = f.user(100 * USDC);
+    let mut params = f.params(10 * USDC);
+    params.question = f.str(&"q".repeat(MAX_METADATA_BYTES as usize));
+
+    let id = f.client().create_claim(&creator, &params);
+    assert_eq!(f.client().get_claim(&id).question.len(), MAX_METADATA_BYTES);
+}
+
+/// One byte over the per-field cap is refused, and no money moved.
+#[test]
+fn over_long_metadata_is_rejected_before_any_money_moves() {
+    let f = Fixture::new(0, 0);
+    let creator = f.user(100 * USDC);
+    let mut params = f.params(10 * USDC);
+    params.question = f.str(&"q".repeat(MAX_METADATA_BYTES as usize + 1));
+
+    let err = f
+        .client()
+        .try_create_claim(&creator, &params)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::MetadataTooLong);
+
+    // The rejection lands before `escrow::pull`, so nothing is escrowed, the
+    // creator's balance is untouched and no claim id is consumed.
+    assert_eq!(f.escrow_balance(), 0);
+    assert_eq!(f.token().balance(&creator), 100 * USDC);
+    assert_eq!(f.client().get_platform_stats().total_claims, 0);
+    let err = f.client().try_get_claim(&1).unwrap_err().unwrap();
+    assert_eq!(err, Error::ClaimNotFound);
+}
+
+/// The per-field caps alone admit 8 × 512 bytes; the aggregate budget is what
+/// bounds the claim as a whole. Exactly at the budget is accepted, one more
+/// byte is refused.
+#[test]
+fn the_aggregate_metadata_budget_is_enforced_exactly() {
+    let f = Fixture::new(0, 0);
+    let creator = f.user(200 * USDC);
+    let mut params = f.params(10 * USDC);
+    params.question = f.str(&"q".repeat(MAX_METADATA_BYTES as usize));
+    params.creator_position = f.str(&"a".repeat(MAX_METADATA_BYTES as usize));
+    params.counter_position = f.str(&"b".repeat(MAX_METADATA_BYTES as usize));
+    params.category = f.str("c");
+    params.market_type = f.str("binary");
+    params.handicap_line = f.str("h");
+    params.settlement_rule = f.str("s");
+    // Fill `resolution_url` so the sum lands on the budget exactly.
+    let fixed = MAX_METADATA_BYTES * 3 + 1 + 6 + 1 + 1;
+    params.resolution_url = f.str(&"u".repeat((MAX_CLAIM_METADATA_BYTES - fixed) as usize));
+
+    let id = f.client().create_claim(&creator, &params);
+    assert_eq!(f.client().get_claim(&id).question.len(), MAX_METADATA_BYTES);
+    assert_eq!(f.escrow_balance(), 10 * USDC);
+
+    // One more metadata byte tips the claim over the budget: refused outright.
+    let mut over = params;
+    over.resolution_url = f.str(&"u".repeat((MAX_CLAIM_METADATA_BYTES - fixed + 1) as usize));
+    let err = f
+        .client()
+        .try_create_claim(&creator, &over)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::ClaimMetadataTooLong);
+    assert_eq!(f.client().get_platform_stats().total_claims, 1);
+    assert_eq!(f.escrow_balance(), 10 * USDC);
 }

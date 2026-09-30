@@ -7,12 +7,18 @@ use soroban_sdk::{contracterror, contracttype, Address, BytesN, String};
 
 pub const MAX_CHALLENGERS: u32 = 100;
 
-/// Maximum number of claim IDs accepted by a single `batch_get_claims` call.
+/// Maximum number of claim ids accepted by `get_claims_batch` in a single call.
 ///
-/// Keeps the Soroban ledger-entry footprint bounded. Each claim is one
-/// persistent storage read; 50 claims fits comfortably within the per-
-/// transaction footprint budget while still being useful for bulk polling.
-pub const MAX_BATCH_CLAIMS: u32 = 50;
+/// Soroban transactions have a bounded ledger-entry footprint: each claim id in
+/// the batch opens one persistent entry (`DataKey::Claim(id)`). At 50 ids the
+/// simulated footprint stays well inside the limits that the public Soroban RPC
+/// enforces; callers that need more claims should make multiple calls or use the
+/// existing range-read path.
+///
+/// Chosen conservatively: the challenge-roster key (`DataKey::Challengers(id)`)
+/// is NOT read by this function, which deliberately keeps the footprint O(n) in
+/// ids rather than O(n × roster-size).
+pub const MAX_BATCH_SIZE: u32 = 50;
 
 /// Decimals of the escrow token. A Stellar Asset Contract exposes every classic
 /// asset, Circle's USDC included, with exactly 7.
@@ -52,6 +58,25 @@ pub const FEE_TIMELOCK_SECONDS: u64 = 172_800; // 2 days
 /// buffer, so a bound is required. 128 bytes is far above any realistic key.
 pub const MAX_INVITE_KEY_BYTES: u32 = 128;
 
+/// Upper bound on the byte length of any single user-supplied metadata string
+/// stored on a claim: the question, both positions, the resolution URL, the
+/// category, the market-config free text, and the oracle's resolution summary.
+///
+/// DEVIATION FROM SOLIDITY: `MimirV2.CreateParams` used Solidity `string`,
+/// which is unbounded. A Soroban persistent entry has a hard size ceiling, and
+/// every stored byte is paid for by the contract and re-read by indexers, so
+/// free text is capped AT THE BOUNDARY instead of being truncated at write
+/// time. 512 bytes is far above any realistic question, URL or settlement rule.
+pub const MAX_METADATA_BYTES: u32 = 512;
+
+/// Upper bound on the SUM of every metadata string stored on one claim.
+///
+/// The per-field cap alone still admits `8 × MAX_METADATA_BYTES` bytes on one
+/// claim; this budget bounds the claim's persistent entry — and each event that
+/// carries its metadata — as a whole. A new claim is refused above it at
+/// creation, before any stake is pulled.
+pub const MAX_CLAIM_METADATA_BYTES: u32 = 2_048;
+
 // ── Enums ────────────────────────────────────────────────────────────────────
 
 #[contracttype]
@@ -71,6 +96,70 @@ pub enum WinnerSide {
     Challengers = 2,
     Draw = 3,
     Unresolvable = 4,
+}
+
+// ── Versioned verdict encoding ────────────────────────────────────────────────
+
+/// Current version of the on-chain verdict encoding.
+///
+/// The tag is stored alongside every verdict written by `resolve_claim` so an
+/// indexer, worker, or future contract version can tell WHICH encoding produced
+/// a stored decision instead of guessing from the shape of the value. Bump this
+/// only together with an explicit decode path for the older versions.
+pub const VERDICT_VERSION_V1: u32 = 1;
+
+/// An oracle verdict carrying its own encoding version.
+///
+/// `version` is an explicit discriminant, not an inference: a reader that does
+/// not know a version must refuse the verdict rather than reinterpret its
+/// fields. `side` is the decision as encoded under that version. `None` is
+/// never a settled verdict, so it is rejected by [`Verdict::decode`] at both
+/// write and read time.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Verdict {
+    pub version: u32,
+    pub side: WinnerSide,
+}
+
+impl Verdict {
+    /// Encode a verdict at the current version. Used by the legacy
+    /// `resolve_claim` entry point, whose callers pass a bare `WinnerSide`.
+    pub fn current(side: WinnerSide) -> Self {
+        Verdict {
+            version: VERDICT_VERSION_V1,
+            side,
+        }
+    }
+
+    /// Validate the version tag and return the decoded side.
+    ///
+    /// Unknown versions are refused with [`Error::UnsupportedVerdictVersion`]
+    /// so a verdict written by a newer encoding can never be silently read as
+    /// version 1. `None` is refused with [`Error::InvalidVerdict`].
+    pub fn decode(&self) -> Result<WinnerSide, Error> {
+        if self.version != VERDICT_VERSION_V1 {
+            return Err(Error::UnsupportedVerdictVersion);
+        }
+        match self.side {
+            WinnerSide::None => Err(Error::InvalidVerdict),
+            side => Ok(side),
+        }
+    }
+
+    /// Backward-compatible decode path for claims resolved before the version
+    /// tag existed. Those claims store only `Claim::winner_side`, which is by
+    /// construction a version-1 encoding, so it is promoted to an explicit
+    /// [`Verdict`] instead of being read as a bare enum forever.
+    pub fn from_unversioned(side: WinnerSide) -> Result<Self, Error> {
+        match side {
+            WinnerSide::None => Err(Error::ClaimNotResolved),
+            side => Ok(Verdict {
+                version: VERDICT_VERSION_V1,
+                side,
+            }),
+        }
+    }
 }
 
 // ── Fee policy ───────────────────────────────────────────────────────────────
@@ -282,6 +371,29 @@ pub enum Error {
     ChallengersDidNotWin = 35,
     UnsupportedDecimals = 36,
     InvalidConfidence = 37,
-    /// `batch_get_claims` was called with more IDs than [`MAX_BATCH_CLAIMS`].
-    ClaimBatchTooLarge = 38,
+    /// `cancel_claim` refused because the claim still holds counterparty funds
+    /// or a reserved creator liability: challengers have funded this market, so
+    /// it belongs to settlement, not to a creator refund.
+    ClaimHasActiveClaims = 38,
+    /// Escrow could not back the cancellation refund at the moment of the call.
+    /// The refund is never minted; the claim stays untouched and the creator
+    /// can retry once the contract is solvent again.
+    RefundNotEscrowed = 39,
+    /// A verdict carried an encoding version this contract cannot decode. The
+    /// verdict is refused rather than reinterpreted, so resolution fails closed
+    /// and the claim is left untouched.
+    UnsupportedVerdictVersion = 40,
+    /// A single claim metadata string exceeded `MAX_METADATA_BYTES`. The
+    /// claim is refused rather than silently truncated, so what is stored is
+    /// always exactly what the caller supplied.
+    MetadataTooLong = 41,
+    /// The claim's combined metadata exceeded `MAX_CLAIM_METADATA_BYTES`. No
+    /// stake is pulled and no storage is written for a claim over the budget.
+    ClaimMetadataTooLong = 42,
+    /// The parent claim referenced by `parent_id` does not exist.
+    ParentClaimNotFound = 43,
+    /// The parent claim is not in a state that allows creating a rematch.
+    ParentClaimInvalidState = 44,
+    /// The parent claim has already been used for a rematch (no duplicate rematches).
+    ParentClaimAlreadyRematched = 45,
 }
