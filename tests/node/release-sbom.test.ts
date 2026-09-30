@@ -29,7 +29,7 @@ test("positive: builds CycloneDX 1.5 SBOM from a valid lockfile fixture", () => 
 
   const names = bom.components.map((c: any) => c.name).sort();
   assert.deepEqual(names, ["left-pad", "ms"]);
-  for (const c of bom.components) {
+  for (const c of bom.components as any[]) {
     assert.equal(c.type, "library");
     assert.ok(c.purl.startsWith("pkg:npm/"));
     assert.ok(c.version);

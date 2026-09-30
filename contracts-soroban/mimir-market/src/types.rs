@@ -58,6 +58,25 @@ pub const FEE_TIMELOCK_SECONDS: u64 = 172_800; // 2 days
 /// buffer, so a bound is required. 128 bytes is far above any realistic key.
 pub const MAX_INVITE_KEY_BYTES: u32 = 128;
 
+/// Upper bound on the byte length of any single user-supplied metadata string
+/// stored on a claim: the question, both positions, the resolution URL, the
+/// category, the market-config free text, and the oracle's resolution summary.
+///
+/// DEVIATION FROM SOLIDITY: `MimirV2.CreateParams` used Solidity `string`,
+/// which is unbounded. A Soroban persistent entry has a hard size ceiling, and
+/// every stored byte is paid for by the contract and re-read by indexers, so
+/// free text is capped AT THE BOUNDARY instead of being truncated at write
+/// time. 512 bytes is far above any realistic question, URL or settlement rule.
+pub const MAX_METADATA_BYTES: u32 = 512;
+
+/// Upper bound on the SUM of every metadata string stored on one claim.
+///
+/// The per-field cap alone still admits `8 × MAX_METADATA_BYTES` bytes on one
+/// claim; this budget bounds the claim's persistent entry — and each event that
+/// carries its metadata — as a whole. A new claim is refused above it at
+/// creation, before any stake is pulled.
+pub const MAX_CLAIM_METADATA_BYTES: u32 = 2_048;
+
 // ── Enums ────────────────────────────────────────────────────────────────────
 
 #[contracttype]
@@ -364,10 +383,17 @@ pub enum Error {
     /// verdict is refused rather than reinterpreted, so resolution fails closed
     /// and the claim is left untouched.
     UnsupportedVerdictVersion = 40,
-    /// The `ids` vector passed to `get_claims_batch` exceeded `MAX_BATCH_SIZE`.
-    ///
-    /// Callers must split large id sets into chunks of at most `MAX_BATCH_SIZE`
-    /// before invoking the function. The limit exists to bound the ledger-entry
-    /// footprint of a single simulated transaction.
-    BatchTooLarge = 41,
+    /// A single claim metadata string exceeded `MAX_METADATA_BYTES`. The
+    /// claim is refused rather than silently truncated, so what is stored is
+    /// always exactly what the caller supplied.
+    MetadataTooLong = 41,
+    /// The claim's combined metadata exceeded `MAX_CLAIM_METADATA_BYTES`. No
+    /// stake is pulled and no storage is written for a claim over the budget.
+    ClaimMetadataTooLong = 42,
+    /// The parent claim referenced by `parent_id` does not exist.
+    ParentClaimNotFound = 43,
+    /// The parent claim is not in a state that allows creating a rematch.
+    ParentClaimInvalidState = 44,
+    /// The parent claim has already been used for a rematch (no duplicate rematches).
+    ParentClaimAlreadyRematched = 45,
 }

@@ -92,6 +92,18 @@ payouts + fees + dust equals escrow inflow. Alongside it:
 - `draw_refunds_everyone_in_full_with_no_fee` and the `Unresolvable` equivalent
 - `a_quote_matches_what_the_pull_actually_pays`
 
+### Settlement dust is deterministic and isolated
+
+The pool-share formula truncates, so a few atomic units can be left over. The
+remainder is a function of the claim's pools alone, so it does not depend on the
+order challengers pull in, and the final puller receives their formula share plus
+exactly that dust — the escrow empties to zero instead of stranding units.
+`src/test_dust_isolation.rs` pins it: the final challenger's gross is
+`formula + dust`, the dust amount is identical under either pull order, an exactly
+dividing pool leaves no dust, `paid + fees + remaining_escrow` equals the inflow
+after every pull, a quote equals the payout it precedes, and an abandoned final
+share keeps the dust in escrow rather than overpaying.
+
 ### Fixed-odds liquidity is a claim-level accounting invariant
 
 A fixed-odds challenge reserves only the challenger's **profit**, because the
@@ -179,6 +191,14 @@ Source: `contracts-soroban/mimir-squad/src/pool.rs`. Tests: `src/test_lifecycle.
 - A cancelled market refunds every principal in full, including both sides of a
   double-sided depositor. A break-even winner pays no fee.
 - `preview_matches_the_amount_actually_paid` ties the quoting view to the pull.
+  `claim` and `preview_claim` share one `winner_gross`, so the preview cannot
+  round the final winner's dust differently from the payout; a position that has
+  already pulled previews as zero, matching `claim`'s no-op, rather than promising
+  a second payout.
+- `src/test_dust_isolation.rs` isolates the same dust property for the squad pool:
+  the final winner's gross is `formula + dust`, the dust is identical under either
+  claim order, an exactly dividing pool leaves none, conservation holds after every
+  claim, and preview equals payout.
 
 ## Virtual baskets
 

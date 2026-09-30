@@ -59,6 +59,7 @@ import { guardChallenge, toCanonicalMode } from "./market-modes";
 import { checkWriteAllowed } from "./ops/flags";
 import { availableCreatorLiquidityUnits } from "./payout";
 import { decodeHash32Hex } from "./content-hash";
+import { getDemoSecret } from "./demo-signers";
 import type { VSCacheFreshness } from "./vs-freshness";
 
 export type { StellarSigner } from "./stellar";
@@ -199,6 +200,8 @@ export interface VSData {
   challenger_addresses?: string[];
   remaining_escrow?: number;
   challenger_claims?: number;
+  evidence_hash?: string;
+  context_hash?: string;
   // Resolution-request flow (optional, surfaces off-chain UI state)
   creator_requested_resolve?: boolean;
   challenger_requested_resolve?: boolean;
@@ -244,6 +247,7 @@ export interface ClaimWriteResult extends ContractWriteResult {
 export interface VSFeedSnapshot {
   items: VSData[];
   cache: VSCacheFreshness | null;
+  nextCursor?: number | null;
 }
 
 export interface VSDetailSnapshot {
@@ -889,16 +893,28 @@ export async function getAllVSFast(): Promise<VSFeedSnapshot> {
   return getAllVSDirect();
 }
 
-export async function getAllVSDirect(): Promise<VSFeedSnapshot> {
+export async function getAllVSDirect(opts?: { cursor?: number; limit?: number }): Promise<VSFeedSnapshot> {
   const count = await getClaimCount();
-  if (count <= 0) return { items: [], cache: makeLiveFreshness() };
+  if (count <= 0) return { items: [], cache: makeLiveFreshness(), nextCursor: null };
 
   const all = await readClaimsRange(1, count);
+  let sortedItems = (all.filter(Boolean) as ClaimData[])
+    .map(mapClaimToVS)
+    .sort((a, b) => b.id - a.id);
+  
+  if (opts?.cursor) {
+    sortedItems = sortedItems.filter(item => item.id < opts.cursor!);
+  }
+
+  const limit = opts?.limit ?? 50;
+  const hasMore = sortedItems.length > limit;
+  const paginatedItems = hasMore ? sortedItems.slice(0, limit) : sortedItems;
+  const nextCursor = hasMore ? paginatedItems[paginatedItems.length - 1].id : null;
+
   return {
-    items: (all.filter(Boolean) as ClaimData[])
-      .map(mapClaimToVS)
-      .sort((a, b) => b.id - a.id),
+    items: paginatedItems,
     cache: makeLiveFreshness(),
+    nextCursor,
   };
 }
 
@@ -1020,11 +1036,13 @@ export async function challengeClaim(
   stakeAmount: number,
   inviteKey = ""
 ): Promise<ClaimWriteResult> {
+  // Before the demo branch, as in createClaim: the demo relay signs with a funded
+  // server key, so a stake pause that only covered the non-demo path was bypassed.
+  const stakeGate = checkWriteAllowed({ capability: "stake" });
+  if (!stakeGate.allowed) throw new Error(stakeGate.detail ?? "staking is unavailable");
   if (isDemoMode()) {
     return sendDemoTx("challenge_claim", { claimId, stakeAmount, inviteKey });
   }
-  const stakeGate = checkWriteAllowed({ capability: "stake" });
-  if (!stakeGate.allowed) throw new Error(stakeGate.detail ?? "staking is unavailable");
   await assertChallengeAllowed(claimId, stakeAmount);
 
   const signer = requireSigner(wallet, "join this market");
@@ -1058,6 +1076,10 @@ export async function resolveClaim(
     evidence_hash?: string;
   },
 ): Promise<ClaimWriteResult> {
+  // Pausing settlement only delays it: withdraw and payout claims stay ungated, and
+  // an expired claim is simply settled on the first poll after the switch clears.
+  const gate = checkWriteAllowed({ capability: "oracle_settlement" });
+  if (!gate.allowed) throw new Error(gate.detail ?? "settlement is unavailable");
   if (isDemoMode()) {
     return sendDemoTx("resolve_claim", { claimId });
   }
@@ -1110,6 +1132,9 @@ export async function createRematch(
   parentId: number,
   params: Pick<CreateClaimParams, "deadline" | "stake_amount" | "invite_key">
 ): Promise<ClaimWriteResult> {
+  // The non-demo path reaches createClaim's gate; the demo relay does not.
+  const gate = checkWriteAllowed({ capability: "create_market" });
+  if (!gate.allowed) throw new Error(gate.detail ?? "market creation is unavailable");
   if (isDemoMode()) {
     return sendDemoTx("create_rematch", { parentId, ...params });
   }
@@ -1281,6 +1306,9 @@ export async function createSquadMarket(
   wallet: WalletArg,
   params: { question: string; deadline: number; fee_bps: number },
 ): Promise<ContractWriteResult & { marketId: number }> {
+  // Squad pools move USDC like binary markets do, so the same switches stop them.
+  const gate = checkWriteAllowed({ capability: "create_market" });
+  if (!gate.allowed) throw new Error(gate.detail ?? "market creation is unavailable");
   const signer = requireSigner(wallet, "open this squad market");
   const { value, write } = await sendCall<bigint>(
     "create_market",
@@ -1300,6 +1328,8 @@ export async function squadDeposit(
   side: number,
   amount: number,
 ): Promise<ContractWriteResult> {
+  const gate = checkWriteAllowed({ capability: "stake" });
+  if (!gate.allowed) throw new Error(gate.detail ?? "staking is unavailable");
   const signer = requireSigner(wallet, "back this side");
   const { write } = await sendCall<void>(
     "deposit",
@@ -1460,26 +1490,6 @@ function buildCreateParams(p: CreateClaimParams): MimirMarket.CreateParams {
 // ── Demo mode helpers ─────────────────────────────────────────────────────────
 function isDemoMode(): boolean {
   return process.env.NEXT_PUBLIC_DEMO_MODE === "1";
-}
-
-function getDemoSecret(action: string): string | undefined {
-  if (action === "create_claim" || action === "create_rematch") {
-    return (
-      process.env.DEMO_CREATOR_STELLAR_SECRET ||
-      process.env.DEMO_SIGNER_STELLAR_SECRET ||
-      process.env.DEMO_CREATOR_PRIVATE_KEY ||
-      process.env.DEMO_SIGNER_PRIVATE_KEY
-    );
-  }
-  if (action === "challenge_claim") {
-    return (
-      process.env.DEMO_CHALLENGER_STELLAR_SECRET ||
-      process.env.DEMO_SIGNER_STELLAR_SECRET ||
-      process.env.DEMO_CHALLENGER_PRIVATE_KEY ||
-      process.env.DEMO_SIGNER_PRIVATE_KEY
-    );
-  }
-  return process.env.DEMO_SIGNER_STELLAR_SECRET || process.env.DEMO_SIGNER_PRIVATE_KEY;
 }
 
 async function getDemoSigner(action: string): Promise<StellarSigner | null> {
@@ -1736,18 +1746,24 @@ export async function getUserClaimSummaries(address: string): Promise<ClaimData[
 
 /** @deprecated use getAllVSFast */
 export async function getAllVSSnapshot(
-  opts?: { forceRefresh?: boolean }
+  opts?: { forceRefresh?: boolean; cursor?: number; limit?: number }
 ): Promise<VSFeedSnapshot> {
   // In the browser this MUST go through /api/vs (the indexed cache): simulating
   // two invocations per claim against the public Soroban RPC trips its
   // per-client rate limit and the whole feed comes back empty.
   if (typeof window !== "undefined") {
-    const res = await fetch(opts?.forceRefresh ? "/api/vs?refresh=1" : "/api/vs");
+    const searchParams = new URLSearchParams();
+    if (opts?.forceRefresh) searchParams.set("refresh", "1");
+    if (opts?.cursor) searchParams.set("cursor", String(opts.cursor));
+    if (opts?.limit) searchParams.set("limit", String(opts.limit));
+    const qs = searchParams.toString();
+
+    const res = await fetch(qs ? `/api/vs?${qs}` : "/api/vs");
     if (!res.ok) throw new Error(`/api/vs returned ${res.status}`);
     const data = await res.json();
-    return { items: data.items ?? [], cache: data.cache ?? null };
+    return { items: data.items ?? [], cache: data.cache ?? null, nextCursor: data.nextCursor ?? null };
   }
-  return getAllVSDirect();
+  return getAllVSDirect(opts);
 }
 
 /** @deprecated use getUserVSFast */
